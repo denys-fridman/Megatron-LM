@@ -152,6 +152,7 @@ class MLP(MegatronModule):
         """Perform the forward pass through the MLP block."""
         # [s, b, 4 * h/p]
         nvtx_range_push(suffix="linear_fc1")
+        print(f"[MLP] fc1 input shape: {hidden_states.shape}")
         intermediate_parallel, bias_parallel = self.linear_fc1(hidden_states)
         nvtx_range_pop(suffix="linear_fc1")
 

@@ -243,6 +243,7 @@ class GroupedMLP(MegatronModule):
             w1 = self.weight1.view(self.num_local_experts, self.config.hidden_size, -1)
             w2 = self.weight2.view(self.num_local_experts, -1, self.config.hidden_size)
 
+            print(f"[GroupedMLP] fc1 input shape: {permuted_local_hidden_states.shape}")
             fc1_output = gg.ops.gmm(
                 permuted_local_hidden_states, w1, tokens_per_expert, trans_b=False
             )
@@ -667,6 +668,7 @@ class TEGroupedMLP(MegatronModule):
         with off_interface(
             self.offload_expert_fc1, permuted_local_hidden_states, "expert_fc1"
         ) as permuted_local_hidden_states:
+            print(f"[TEGroupedMLP] fc1 input shape: {permuted_local_hidden_states.shape}")
             fc1_output, bias_parallel = self.linear_fc1(
                 permuted_local_hidden_states, tokens_per_expert
             )
