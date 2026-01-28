@@ -16,6 +16,7 @@ from megatron.core.transformer.moe.moe_utils import (
     compute_routing_scores_for_aux_loss,
     router_gating_linear,
     save_to_aux_losses_tracker,
+    save_to_tokens_per_expert_tracker,
     sinkhorn,
     switch_load_balancing_loss_func,
     topk_routing_with_score_function,
@@ -539,6 +540,22 @@ class TopKRouter(Router):
 
         # Optionally apply expert bias
         self._apply_expert_bias(routing_map)
+
+        # Track tokens per expert distribution for logging
+        if self.training and torch.is_grad_enabled():
+            tokens_per_expert = routing_map.sum(dim=0)
+            tokens_per_expert = reduce_from_tensor_model_parallel_region(
+                tokens_per_expert, self.tp_cp_group
+            )
+            num_layers = self.config.num_layers
+            if self.config.mtp_num_layers is not None:
+                num_layers += self.config.mtp_num_layers
+            save_to_tokens_per_expert_tracker(
+                tokens_per_expert,
+                self.layer_number,
+                num_layers,
+                reduce_group=self.tp_cp_group,
+            )
 
         return probs, routing_map
 

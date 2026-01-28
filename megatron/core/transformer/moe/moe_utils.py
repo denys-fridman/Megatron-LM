@@ -38,6 +38,7 @@ except ImportError:
 
 # MOE logging
 _MOE_LAYER_WISE_LOGGING_TRACKER = {}
+_MOE_TOKENS_PER_EXPERT_TRACKER = {}
 
 
 def switch_load_balancing_loss_func(
@@ -913,6 +914,131 @@ def get_moe_layer_wise_logging_tracker():
     """Return the moe layer wise tracker."""
     global _MOE_LAYER_WISE_LOGGING_TRACKER
     return _MOE_LAYER_WISE_LOGGING_TRACKER
+
+
+def get_moe_tokens_per_expert_tracker():
+    """Return the moe tokens per expert tracker."""
+    global _MOE_TOKENS_PER_EXPERT_TRACKER
+    return _MOE_TOKENS_PER_EXPERT_TRACKER
+
+
+def save_to_tokens_per_expert_tracker(
+    tokens_per_expert: torch.Tensor,
+    layer_number: int,
+    num_layers: int,
+    reduce_group: torch.distributed.ProcessGroup = None,
+):
+    """Save the tokens per expert distribution for logging.
+
+    Args:
+        tokens_per_expert (torch.Tensor): Tensor of shape [num_experts] with token counts.
+        layer_number (int): Layer index (1-indexed).
+        num_layers (int): The number of total layers.
+        reduce_group (torch.distributed.ProcessGroup): The group for reducing the counts.
+    """
+    # Skip logging if layer_number is None.
+    if layer_number is None:
+        return
+
+    tracker = get_moe_tokens_per_expert_tracker()
+    num_experts = tokens_per_expert.shape[0]
+
+    if "tokens_per_expert" not in tracker:
+        tracker["tokens_per_expert"] = {}
+        # Store per-layer, per-expert counts: [num_layers, num_experts]
+        tracker["tokens_per_expert"]["values"] = torch.zeros(
+            num_layers, num_experts, device=tokens_per_expert.device, dtype=torch.float32
+        )
+    tracker["tokens_per_expert"]["values"][layer_number - 1] += tokens_per_expert.detach().float()
+    tracker["tokens_per_expert"]["reduce_group"] = reduce_group
+    tracker["tokens_per_expert"]["num_experts"] = num_experts
+
+
+def clear_tokens_per_expert_tracker():
+    """Clear the tokens per expert tracker."""
+    tracker = get_moe_tokens_per_expert_tracker()
+    if "tokens_per_expert" in tracker:
+        tracker["tokens_per_expert"]["values"].zero_()
+
+
+def reduce_tokens_per_expert_tracker_across_ranks(
+    pg_collection: Optional[ProcessGroupCollection] = None,
+):
+    """Collect and reduce the tokens per expert counts across ranks."""
+    tracker = get_moe_tokens_per_expert_tracker()
+    if "tokens_per_expert" not in tracker:
+        return
+
+    if pg_collection is None:
+        pp_group = parallel_state.get_pipeline_model_parallel_group()
+        dp_group = parallel_state.get_data_parallel_group(
+            with_context_parallel=False, partial_data_parallel=False
+        )
+    else:
+        pp_group = pg_collection.pp
+        dp_group = pg_collection.dp
+
+    values = tracker["tokens_per_expert"]["values"]
+    # Collect across PP.
+    torch.distributed.all_reduce(values, group=pp_group)
+    # Reduce across the reduce_group (typically tp_cp_group).
+    if tracker["tokens_per_expert"].get("reduce_group") is not None:
+        torch.distributed.all_reduce(values, group=tracker["tokens_per_expert"]["reduce_group"])
+    # Sum across data parallel ranks to get total counts.
+    torch.distributed.all_reduce(values, group=dp_group)
+
+
+def print_tokens_per_expert_stats(
+    iteration: int,
+    num_layers: Optional[int] = None,
+    moe_layer_freq: Optional[Union[int, List[int]]] = None,
+):
+    """Print tokens per expert distribution statistics for debugging.
+
+    Prints per-rank statistics to help diagnose load imbalance across expert parallel ranks,
+    which can cause OOM issues when some ranks receive significantly more tokens than others.
+
+    Args:
+        iteration (int): Current training iteration.
+        num_layers (int): Total number of layers.
+        moe_layer_freq: MoE layer frequency pattern.
+    """
+    tracker = get_moe_tokens_per_expert_tracker()
+    if "tokens_per_expert" not in tracker:
+        return
+
+    # Get rank information
+    global_rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+    ep_rank = parallel_state.get_expert_model_parallel_rank() if parallel_state.is_initialized() else 0
+    ep_size = parallel_state.get_expert_model_parallel_world_size() if parallel_state.is_initialized() else 1
+
+    # values shape: [num_layers, num_experts_on_this_rank]
+    # Note: NOT reduced across ranks - we want per-rank stats for OOM debugging
+    values = tracker["tokens_per_expert"]["values"].float()
+    num_local_experts = tracker["tokens_per_expert"]["num_experts"]
+
+    # Sum across layers to get total tokens per expert on this rank
+    total_tokens_per_expert = values.sum(dim=0)  # [num_local_experts]
+    total_tokens_this_rank = total_tokens_per_expert.sum().item()
+
+    # Compute distribution statistics for local experts
+    mean_tokens = total_tokens_per_expert.mean().item()
+    std_tokens = total_tokens_per_expert.std().item()
+    min_tokens = total_tokens_per_expert.min().item()
+    max_tokens = total_tokens_per_expert.max().item()
+    min_expert_idx = total_tokens_per_expert.argmin().item()
+    max_expert_idx = total_tokens_per_expert.argmax().item()
+
+    # Print stats - all ranks print for OOM debugging
+    print(
+        f"[Iter {iteration}] [Rank {global_rank}] [EP {ep_rank}/{ep_size}] "
+        f"Tokens per expert: total={total_tokens_this_rank:.0f}, "
+        f"mean={mean_tokens:.1f}, std={std_tokens:.1f}, "
+        f"min={min_tokens:.0f} (expert {min_expert_idx}), "
+        f"max={max_tokens:.0f} (expert {max_expert_idx})"
+    )
+
+    clear_tokens_per_expert_tracker()
 
 
 @internal_api
