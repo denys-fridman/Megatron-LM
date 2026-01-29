@@ -42,6 +42,7 @@ from megatron.core.transformer.moe import grouped_gemm_util as gg
 from megatron.core.transformer.moe.moe_utils import (
     ProcessGroupCollection,
     get_align_size_for_quantization,
+    save_to_fc1_input_shape_tracker,
 )
 from megatron.core.transformer.spec_utils import build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
@@ -887,6 +888,12 @@ class TEGroupedMLP(MegatronModule):
                 permuted_local_hidden_states, name="expert_fc1"
             )
         with get_fine_grained_offloading_context(self.offload_expert_fc1):
+            if self.training and torch.is_grad_enabled():
+                save_to_fc1_input_shape_tracker(
+                    tuple(permuted_local_hidden_states.shape),
+                    getattr(self, 'layer_number', None),
+                    tokens_per_expert,
+                )
             fc1_output, bias_parallel = self.linear_fc1(
                 permuted_local_hidden_states, tokens_per_expert
             )

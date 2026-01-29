@@ -1048,19 +1048,20 @@ def get_moe_fc1_input_shape_tracker():
     return _MOE_FC1_INPUT_SHAPE_TRACKER
 
 
-def save_to_fc1_input_shape_tracker(shape: tuple, layer_number: int):
+def save_to_fc1_input_shape_tracker(shape: tuple, layer_number: int, tokens_per_expert: list):
     """Save the fc1 input shape for a given layer.
 
     Args:
         shape (tuple): The shape of the input tensor to fc1.
         layer_number (int): Layer index (1-indexed).
+        tokens_per_expert (list): List of token counts per expert.
     """
     if layer_number is None:
         return
     tracker = get_moe_fc1_input_shape_tracker()
     if "shapes" not in tracker:
         tracker["shapes"] = {}
-    tracker["shapes"][layer_number] = shape
+    tracker["shapes"][layer_number] = (shape, tokens_per_expert)
 
 
 def print_fc1_input_shapes(iteration: int):
@@ -1076,10 +1077,10 @@ def print_fc1_input_shapes(iteration: int):
     global_rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
 
     for layer_number in sorted(tracker["shapes"]):
-        shape = tracker["shapes"][layer_number]
+        shape, tokens_per_expert = tracker["shapes"][layer_number]
         print(
             f"[Iter {iteration}] [Layer {layer_number}] [Rank {global_rank}] "
-            f"fc1 input shape: {shape}"
+            f"fc1 input shape: {shape}, tokens_per_expert: {tokens_per_expert}"
         )
 
     tracker["shapes"] = {}
