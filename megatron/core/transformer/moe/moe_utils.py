@@ -39,6 +39,7 @@ except ImportError:
 # MOE logging
 _MOE_LAYER_WISE_LOGGING_TRACKER = {}
 _MOE_TOKENS_PER_EXPERT_TRACKER = {}
+_MOE_FC1_INPUT_SHAPE_TRACKER = {}
 
 
 def switch_load_balancing_loss_func(
@@ -1039,6 +1040,49 @@ def print_tokens_per_expert_stats(
     )
 
     clear_tokens_per_expert_tracker()
+
+
+def get_moe_fc1_input_shape_tracker():
+    """Return the fc1 input shape tracker."""
+    global _MOE_FC1_INPUT_SHAPE_TRACKER
+    return _MOE_FC1_INPUT_SHAPE_TRACKER
+
+
+def save_to_fc1_input_shape_tracker(shape: tuple, layer_number: int):
+    """Save the fc1 input shape for a given layer.
+
+    Args:
+        shape (tuple): The shape of the input tensor to fc1.
+        layer_number (int): Layer index (1-indexed).
+    """
+    if layer_number is None:
+        return
+    tracker = get_moe_fc1_input_shape_tracker()
+    if "shapes" not in tracker:
+        tracker["shapes"] = {}
+    tracker["shapes"][layer_number] = shape
+
+
+def print_fc1_input_shapes(iteration: int):
+    """Print fc1 input shapes per layer for debugging.
+
+    Args:
+        iteration (int): Current training iteration.
+    """
+    tracker = get_moe_fc1_input_shape_tracker()
+    if "shapes" not in tracker:
+        return
+
+    global_rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+
+    for layer_number in sorted(tracker["shapes"]):
+        shape = tracker["shapes"][layer_number]
+        print(
+            f"[Iter {iteration}] [Layer {layer_number}] [Rank {global_rank}] "
+            f"fc1 input shape: {shape}"
+        )
+
+    tracker["shapes"] = {}
 
 
 @internal_api
