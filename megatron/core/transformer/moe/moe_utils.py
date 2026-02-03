@@ -1,6 +1,7 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 import math
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import List, Optional, Union
 
@@ -1051,6 +1052,8 @@ def get_moe_fc1_input_shape_tracker():
 def save_to_fc1_input_shape_tracker(shape: tuple, layer_number: int, tokens_per_expert: list):
     """Save the fc1 input shape for a given layer.
 
+    Accumulates shapes and tokens_per_expert for all microbatches in the current iteration.
+
     Args:
         shape (tuple): The shape of the input tensor to fc1.
         layer_number (int): Layer index (1-indexed).
@@ -1060,12 +1063,14 @@ def save_to_fc1_input_shape_tracker(shape: tuple, layer_number: int, tokens_per_
         return
     tracker = get_moe_fc1_input_shape_tracker()
     if "shapes" not in tracker:
-        tracker["shapes"] = {}
-    tracker["shapes"][layer_number] = (shape, tokens_per_expert)
+        tracker["shapes"] = defaultdict(list)
+    tracker["shapes"][layer_number].append((shape, tokens_per_expert))
 
 
 def print_fc1_input_shapes(iteration: int):
     """Print fc1 input shapes per layer for debugging.
+
+    Prints all accumulated microbatches for each layer to help diagnose load imbalance.
 
     Args:
         iteration (int): Current training iteration.
@@ -1077,11 +1082,14 @@ def print_fc1_input_shapes(iteration: int):
     global_rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
 
     for layer_number in sorted(tracker["shapes"]):
-        shape, tokens_per_expert = tracker["shapes"][layer_number]
-        print(
-            f"[Iter {iteration}] [Layer {layer_number}] [Rank {global_rank}] "
-            f"fc1 input shape: {shape}, tokens_per_expert: {tokens_per_expert}"
-        )
+        microbatch_data = tracker["shapes"][layer_number]
+        num_microbatches = len(microbatch_data)
+        for mb_idx, (shape, tokens_per_expert) in enumerate(microbatch_data):
+            print(
+                f"[Iter {iteration}] [Layer {layer_number}] [Rank {global_rank}] "
+                f"[Microbatch {mb_idx+1}/{num_microbatches}] "
+                f"fc1 input shape: {shape}, tokens_per_expert: {tokens_per_expert}"
+            )
 
     tracker["shapes"] = {}
 
