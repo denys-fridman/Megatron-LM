@@ -7,6 +7,7 @@ import torch
 
 from megatron.core.jit import jit_fuser
 from megatron.core.transformer.module import MegatronModule
+from megatron.core.tensor_parallel.mappings import reduce_from_tensor_model_parallel_region
 from megatron.core.transformer.moe.moe_utils import (
     MoEAuxLossAutoScaler,
     ProcessGroupCollection,
