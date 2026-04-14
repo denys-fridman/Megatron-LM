@@ -764,7 +764,7 @@ class TEGroupedMLP(MegatronModule):
         with off_interface(
             self.offload_expert_fc1, permuted_local_hidden_states, "expert_fc1"
         ) as permuted_local_hidden_states:
-            if self.training and torch.is_grad_enabled() and not is_checkpointing():
+            if self.training and not (is_checkpointing() and torch.is_grad_enabled()):
                 save_to_fc1_input_shape_tracker(
                     tuple(permuted_local_hidden_states.shape),
                     getattr(self, 'layer_number', None),
