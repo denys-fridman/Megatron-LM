@@ -49,6 +49,7 @@ from megatron.core.transformer.moe.moe_utils import (
     get_align_size_for_quantization,
     save_to_fc1_input_shape_tracker,
 )
+from megatron.core.tensor_parallel.random import is_checkpointing
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import (
     ensure_metadata_has_dp_cp_group,
@@ -763,7 +764,7 @@ class TEGroupedMLP(MegatronModule):
         with off_interface(
             self.offload_expert_fc1, permuted_local_hidden_states, "expert_fc1"
         ) as permuted_local_hidden_states:
-            if self.training and torch.is_grad_enabled():
+            if self.training and torch.is_grad_enabled() and not is_checkpointing():
                 save_to_fc1_input_shape_tracker(
                     tuple(permuted_local_hidden_states.shape),
                     getattr(self, 'layer_number', None),
