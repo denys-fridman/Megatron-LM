@@ -1330,7 +1330,7 @@ def print_fc1_input_shapes(iteration: int):
                 f"fc1 input shape: {shape}, tokens_per_expert: {tokens_per_expert}"
             )
 
-    tracker["shapes"] = {}
+    tracker["shapes"] = defaultdict(list)
 
 
 @internal_api
