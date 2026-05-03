@@ -742,6 +742,28 @@ def forward_backward_no_pipelining(
     ):
         create_cudagraphs()
 
+    # ==== PerfClaw FB phase report ====
+    if _pc_fb_events is not None:
+        _pc_fb_mark("fb_end")
+        torch.cuda.synchronize()
+        try:
+            rank = torch.distributed.get_rank()
+        except Exception:
+            rank = 0
+        if rank == 0:
+            if not hasattr(forward_backward_no_pipelining, "_pc_call_idx"):
+                forward_backward_no_pipelining._pc_call_idx = 0
+            forward_backward_no_pipelining._pc_call_idx += 1
+            idx = forward_backward_no_pipelining._pc_call_idx
+            if idx in (16, 17, 18):
+                print(f"[PERFCLAW_FB] call_idx={idx} rank=0 fb_phases:")
+                prev_name, prev_ev = _pc_fb_events[0]
+                for name, ev in _pc_fb_events[1:]:
+                    ms = prev_ev.elapsed_time(ev)
+                    print(f"[PERFCLAW_FB]   {prev_name:25s} -> {name:25s} : {ms:8.3f} ms")
+                    prev_name, prev_ev = name, ev
+    # ==== end ====
+
     return forward_data_store
 
 
