@@ -7,6 +7,36 @@ from typing import List, Optional, Union
 import torch
 from torch import inf
 
+# ---------------------------------------------------------------------------
+# Cached per-process singletons to avoid per-step cudaMalloc + kernel-launch of
+# tiny scratch tensors in the hot optimizer path. `dummy_overflow_buf` is used
+# by multi_tensor_applier as a noop_flag; the empty-grads fallback `zero_norm`
+# is returned when there are no grads to reduce. Both are allocated once per
+# process and reused every step, eliminating ~2 non-graphed FillFunctor<int>
+# launches per optimizer.step() on the GPU timeline.
+# ---------------------------------------------------------------------------
+_cached_overflow_buf = None
+_cached_zero_norm = None
+
+
+def _get_overflow_buf() -> torch.Tensor:
+    global _cached_overflow_buf
+    if _cached_overflow_buf is None:
+        _cached_overflow_buf = torch.zeros(1, dtype=torch.int, device='cuda')
+    else:
+        # multi_tensor_applier uses this as a noop_flag; callee may write a
+        # non-zero value to signal overflow/NaN. Reset to zero in-place.
+        _cached_overflow_buf.zero_()
+    return _cached_overflow_buf
+
+
+def _get_zero_norm() -> torch.Tensor:
+    global _cached_zero_norm
+    if _cached_zero_norm is None:
+        _cached_zero_norm = torch.zeros(1, dtype=torch.float, device='cuda')
+    return _cached_zero_norm
+
+
 try:
     from transformer_engine.pytorch.optimizers import (
         multi_tensor_applier,
@@ -106,7 +136,7 @@ def get_grad_norm_fp32(
 
     else:
         if norm_type == 2.0:
-            dummy_overflow_buf = torch.zeros(1, dtype=torch.int, device='cuda')
+            dummy_overflow_buf = _get_overflow_buf()
             # Use apex's multi-tensor applier for efficiency reasons.
             # Multi-tensor applier takes a function and a list of list
             # and performs the operation on that list all in one kernel.
@@ -118,7 +148,7 @@ def get_grad_norm_fp32(
                     False,  # no per-parameter norm
                 )
             else:
-                grad_norm = torch.zeros(1, dtype=torch.float, device='cuda')
+                grad_norm = _get_zero_norm()
             # Since we will be summing across data parallel groups,
             # we need the pow(norm-type).
             total_norm = grad_norm**norm_type
@@ -181,7 +211,7 @@ def clip_grad_by_total_norm_fp32(
 
     # Scale.
     clip_coeff = max_norm / (total_norm + 1.0e-6)
-    dummy_overflow_buf = torch.zeros(1, dtype=torch.int, device='cuda')
+    dummy_overflow_buf = _get_overflow_buf()
     if isinstance(clip_coeff, torch.Tensor):
         clip_coeff.clamp_max_(1.0)
         assert (
