@@ -2631,7 +2631,12 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         )
 
         # Utility method for copying group params.
+        # Perf: batch copies across all params into a single `torch._foreach_copy_`
+        # call instead of launching one kernel per param. Saves ~200 non-graphed
+        # launches per step on llama-8b.
         def copy_group_params(shard_main_groups, model_groups):
+            dst_list = []
+            src_list = []
             for shard_main_group, model_group in zip(shard_main_groups, model_groups):
                 for shard_main_param, model_param in zip(shard_main_group, model_group):
 
@@ -2650,8 +2655,10 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                     if self._is_distopt_quantized_param(model_param) or is_nvfp4tensor(model_param):
                         # Quantized params are handled above.
                         continue
-                    else:
-                        shard_model_param.data.copy_(shard_main_param)
+                    dst_list.append(shard_model_param.data)
+                    src_list.append(shard_main_param)
+            if dst_list:
+                torch._foreach_copy_(dst_list, src_list)
 
         # Copy shard groups to model groups.
         copy_group_params(self.shard_fp32_from_float16_groups, self.model_float16_groups)
