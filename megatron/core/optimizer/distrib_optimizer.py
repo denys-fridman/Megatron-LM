@@ -2548,7 +2548,17 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             return
 
         # Utility method for copying group grads.
+        # Perf: batch the bf16->fp32 grad casts into a single
+        # `torch._foreach_copy_` call. This replaces ~200 per-step
+        # direct_copy_kernel launches (one per param) with ~1 batched
+        # multi-tensor kernel. Uses pre-allocated `.grad` slots (allocated on
+        # the first call and reused thereafter) so each step is a pure copy
+        # with implicit dtype conversion, rather than a fresh `.float()`
+        # allocation + assignment.
         def copy_group_grads(model_groups, shard_main_groups):
+            dst_list = []
+            src_list = []
+            main_list = []
             for model_group, shard_main_group in zip(model_groups, shard_main_groups):
                 for model_param, shard_main_param in zip(model_group, shard_main_group):
 
@@ -2562,11 +2572,21 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                         # Pytorch requires a param and its' grad to be the same dtype, but we want
                         # their types to be different in precision-aware optimizer. So we use
                         # ".decoupled_grad" to replace ".grad".
-                        # Note that this requires corresponding modifications in the optimizer (Let
-                        # the optimizer read gradients from ".decoupled_grad" instead of ".grad").
                         shard_main_param.decoupled_grad = shard_model_grad
                     else:
-                        shard_main_param.grad = shard_model_grad.float()
+                        # Pre-allocate the fp32 grad buffer once and reuse every
+                        # step. Collect (dst, src) pairs and batch below.
+                        if shard_main_param.grad is None or \
+                                shard_main_param.grad.shape != shard_main_param.shape:
+                            shard_main_param.grad = torch.empty_like(
+                                shard_main_param, dtype=torch.float
+                            )
+                        dst_list.append(shard_main_param.grad)
+                        src_list.append(shard_model_grad)
+                        main_list.append(shard_main_param)
+            if dst_list:
+                # _foreach_copy_ handles implicit dtype conversion.
+                torch._foreach_copy_(dst_list, src_list)
 
         # Copy model groups to shard groups.
         if self.config.use_precision_aware_optimizer_no_fp8_or_ds_fp8:
