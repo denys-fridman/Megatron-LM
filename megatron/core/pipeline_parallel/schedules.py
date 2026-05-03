@@ -601,6 +601,19 @@ def forward_backward_no_pipelining(
     force_all_reduce: Optional[bool] = False,
 ):
     """Run forward and backward passes with no pipeline parallelism"""
+    # ==== PerfClaw FB phase timers (env-gated) ====
+    import os as _os_pc_fb
+    _pc_fb_events = None
+    if _os_pc_fb.environ.get("PERFCLAW_PROFILE_FB", "0") == "1" and not forward_only:
+        _pc_fb_events = []
+    def _pc_fb_mark(name):
+        if _pc_fb_events is None:
+            return
+        ev = torch.cuda.Event(enable_timing=True)
+        ev.record()
+        _pc_fb_events.append((name, ev))
+    _pc_fb_mark("fb_begin")
+    # ==== end ====
 
     if pg_collection is None:
         tp_group = parallel_state.get_tensor_model_parallel_group()
@@ -671,6 +684,7 @@ def forward_backward_no_pipelining(
     else:
         with no_sync_func():
             for i in range(num_microbatches - 1):
+                _pc_fb_mark(f"mb{i}_fwd_begin")
                 output_tensor, num_tokens = forward_step(
                     forward_step_func,
                     data_iterator,
@@ -685,10 +699,13 @@ def forward_backward_no_pipelining(
                     current_microbatch=i,
                 )
                 total_num_tokens += num_tokens
+                _pc_fb_mark(f"mb{i}_fwd_end")
                 if not forward_only:
                     backward_step(input_tensor, output_tensor, output_tensor_grad, config)
+                    _pc_fb_mark(f"mb{i}_bwd_end")
         # Run computation for last microbatch out of context handler (want to
         # synchronize gradients).
+        _pc_fb_mark("last_mb_fwd_begin")
         output_tensor, num_tokens = forward_step(
             forward_step_func,
             data_iterator,
@@ -706,9 +723,11 @@ def forward_backward_no_pipelining(
         )
 
         total_num_tokens += num_tokens
+        _pc_fb_mark("last_mb_fwd_end")
 
         if not forward_only:
             backward_step(input_tensor, output_tensor, output_tensor_grad, config)
+            _pc_fb_mark("last_mb_bwd_end")
 
     if config.finalize_model_grads_func is not None and not forward_only:
         # Finalize model grads (perform full grad all-reduce / reduce-scatter for
@@ -719,6 +738,7 @@ def forward_backward_no_pipelining(
             pg_collection=pg_collection,
             force_all_reduce=force_all_reduce,
         )
+        _pc_fb_mark("finalize_grads_end")
 
     if getattr(config, 'fine_grained_activation_offloading', False):
         off_interface.reset()
