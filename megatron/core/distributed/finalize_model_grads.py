@@ -448,6 +448,18 @@ def finalize_model_grads(
     if config.timers is not None:
         config.timers('all-grads-sync').stop()
 
+    # PerfClaw iter20d: fast-path when TP=1 and PP=1 (no shared embeddings, no seq-parallel, no tokens-per-loss norm).
+    # Skips three sequential all-reduce no-ops that still have Python/timer overhead in the hot path.
+    from megatron.core.utils import get_pg_size as _pc_get_pg_size
+    if (num_tokens is None
+            and _pc_get_pg_size(tp_group) <= 1
+            and _pc_get_pg_size(pp_group) <= 1
+            and _pc_get_pg_size(embd_group) <= 1
+            and not getattr(config, "moe_router_enable_expert_bias", False)
+            and not getattr(config, "sequence_parallel", False)):
+        reset_model_temporary_tensors(config, model)
+        return
+
     # All-reduce t_embedder grads (for pp & vpp of DiT).
     if config.timers is not None:
         config.timers('conditional-embedder-grads-all-reduce', log_level=1).start(
