@@ -170,7 +170,8 @@ class MegatronOptimizer(ABC):
                 # Prefer BF16 gradient reference when available — halves memory
                 # bandwidth for norm computation vs the FP32 copy (same values,
                 # apex multi_tensor_l2norm accumulates in FP32 regardless).
-                grad = getattr(param, '_grad_bf16', None) or param.grad
+                _bf16 = getattr(param, '_grad_bf16', None)
+                grad = _bf16 if _bf16 is not None else param.grad
             grad_not_none = grad is not None
             is_not_shared = param_is_not_shared(param)
             is_not_tp_duplicate = tensor_parallel.param_is_not_tensor_parallel_duplicate(
