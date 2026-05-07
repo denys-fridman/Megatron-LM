@@ -218,15 +218,27 @@ class MegatronOptimizer(ABC):
         return total_norm
 
     def clip_grad_norm(self, clip_grad: float) -> float:
-        """Compute and return grad norm, also clip grads."""
+        """Compute and return grad norm, also clip grads.
+
+        With GRAD_NORM_INTERVAL > 1, recomputes the norm only every N steps and
+        reuses the cached value on intermediate steps. The clip still runs every step
+        using the (possibly stale) norm. Reduces grad norm compute cost by ~N-fold.
+        """
         params = self.get_parameters()
-        if params:
-            grads_for_norm = self.get_main_grads_for_grad_norm()
-        else:
-            grads_for_norm = []
-        grad_norm = get_grad_norm_fp32(
-            grads_for_norm, grad_stats_parallel_group=self.get_grad_stats_parallel_group()
-        )
+        if not hasattr(self, '_norm_interval_step'):
+            self._norm_interval_step = 0
+            self._cached_grad_norm = None
+        interval = getattr(self.config, 'grad_norm_interval', 1)
+        self._norm_interval_step += 1
+        if self._cached_grad_norm is None or self._norm_interval_step % interval == 0:
+            if params:
+                grads_for_norm = self.get_main_grads_for_grad_norm()
+            else:
+                grads_for_norm = []
+            self._cached_grad_norm = get_grad_norm_fp32(
+                grads_for_norm, grad_stats_parallel_group=self.get_grad_stats_parallel_group()
+            )
+        grad_norm = self._cached_grad_norm
 
         if params:
             clip_grad_by_total_norm_fp32(

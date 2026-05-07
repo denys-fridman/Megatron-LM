@@ -391,6 +391,10 @@ class OptimizerConfig:
     optimizer_cuda_graph: bool = False
     """If true, enables CUDA graph for optimizer step."""
 
+    grad_norm_interval: int = 1
+    """Recompute grad norm only every N steps; reuse cached value on intermediate steps.
+    N=1 (default) = compute every step. N=2 saves ~50% of grad norm compute cost."""
+
     def __post_init__(self):
         """Check the validity of the config."""
 
