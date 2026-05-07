@@ -2567,6 +2567,8 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                         shard_main_param.decoupled_grad = shard_model_grad
                     else:
                         shard_main_param.grad = shard_model_grad.float()
+                        # Keep a BF16 reference for cheaper grad-norm computation (no float cast).
+                        shard_main_param._grad_bf16 = shard_model_grad
 
         # Copy model groups to shard groups.
         if self.config.use_precision_aware_optimizer_no_fp8_or_ds_fp8:

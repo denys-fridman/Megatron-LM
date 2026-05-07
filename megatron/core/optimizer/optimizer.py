@@ -167,7 +167,10 @@ class MegatronOptimizer(ABC):
                 # Megatron-FSDP gradients are DTensors.
                 grad = param.grad._local_tensor if param.grad is not None else None
             else:
-                grad = param.grad
+                # Prefer BF16 gradient reference when available — halves memory
+                # bandwidth for norm computation vs the FP32 copy (same values,
+                # apex multi_tensor_l2norm accumulates in FP32 regardless).
+                grad = getattr(param, '_grad_bf16', None) or param.grad
             grad_not_none = grad is not None
             is_not_shared = param_is_not_shared(param)
             is_not_tp_duplicate = tensor_parallel.param_is_not_tensor_parallel_duplicate(

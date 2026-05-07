@@ -85,6 +85,9 @@ def get_grad_norm_fp32(
         data_parallel_group = get_data_parallel_group_if_dtensor(grad, data_parallel_group)
 
     grads_for_norm = [to_local_if_dtensor(grad) for grad in grads_for_norm]
+    # Cast BF16 grads to FP32 for norm accumulation if apex l2norm doesn't support BF16.
+    # apex multi_tensor_l2norm supports BF16 on Hopper/Blackwell and reads at BF16 bandwidth
+    # while accumulating in FP32, so no explicit cast is needed in those environments.
 
     # Norm parameters.
     norm_type = float(norm_type)
