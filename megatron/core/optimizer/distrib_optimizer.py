@@ -2566,7 +2566,15 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                         # the optimizer read gradients from ".decoupled_grad" instead of ".grad").
                         shard_main_param.decoupled_grad = shard_model_grad
                     else:
-                        shard_main_param.grad = shard_model_grad.float()
+                        # Reuse pre-allocated FP32 buffer to avoid repeated cudaMalloc each step.
+                        if not hasattr(shard_main_param, '_grad_fp32_buf'):
+                            shard_main_param._grad_fp32_buf = torch.empty(
+                                shard_main_param.nelement(),
+                                dtype=torch.float32,
+                                device=shard_main_param.device,
+                            )
+                        shard_main_param._grad_fp32_buf.copy_(shard_model_grad)
+                        shard_main_param.grad = shard_main_param._grad_fp32_buf
 
         # Copy model groups to shard groups.
         if self.config.use_precision_aware_optimizer_no_fp8_or_ds_fp8:
