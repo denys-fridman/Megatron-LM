@@ -2547,34 +2547,72 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             # during the backward pass.
             return
 
-        # Utility method for copying group grads.
-        def copy_group_grads(model_groups, shard_main_groups):
-            for model_group, shard_main_group in zip(model_groups, shard_main_groups):
-                for model_param, shard_main_param in zip(model_group, shard_main_group):
-
-                    param_range_map = self._get_model_param_range_map(model_param)
-                    param_range = param_range_map["param"]
-                    assert param_range.size == shard_main_param.nelement()
-
-                    model_grad = model_param.main_grad
-                    shard_model_grad = model_grad.view(-1)[param_range.start : param_range.end]
-                    if self.config.use_precision_aware_optimizer_no_fp8_or_ds_fp8:
-                        # Pytorch requires a param and its' grad to be the same dtype, but we want
-                        # their types to be different in precision-aware optimizer. So we use
-                        # ".decoupled_grad" to replace ".grad".
-                        # Note that this requires corresponding modifications in the optimizer (Let
-                        # the optimizer read gradients from ".decoupled_grad" instead of ".grad").
-                        shard_main_param.decoupled_grad = shard_model_grad
-                    else:
-                        shard_main_param.grad = shard_model_grad.float()
-
-        # Copy model groups to shard groups.
         if self.config.use_precision_aware_optimizer_no_fp8_or_ds_fp8:
-            copy_group_grads(self.model_float16_groups, self.shard_float16_groups)
-            copy_group_grads(self.model_fp32_groups, self.shard_fp32_groups)
-        else:
-            copy_group_grads(self.model_float16_groups, self.shard_fp32_from_float16_groups)
-            copy_group_grads(self.model_fp32_groups, self.shard_fp32_groups)
+            # Precision-aware path: use decoupled_grad, no FP32 copy.
+            def copy_group_grads_pa(model_groups, shard_main_groups):
+                for model_group, shard_main_group in zip(model_groups, shard_main_groups):
+                    for model_param, shard_main_param in zip(model_group, shard_main_group):
+                        param_range_map = self._get_model_param_range_map(model_param)
+                        param_range = param_range_map["param"]
+                        assert param_range.size == shard_main_param.nelement()
+                        model_grad = model_param.main_grad
+                        shard_model_grad = model_grad.view(-1)[param_range.start : param_range.end]
+                        shard_main_param.decoupled_grad = shard_model_grad
+            copy_group_grads_pa(self.model_float16_groups, self.shard_float16_groups)
+            copy_group_grads_pa(self.model_fp32_groups, self.shard_fp32_groups)
+            return
+
+        # Non-precision-aware path: BF16→FP32 copy with CUDA-graph acceleration.
+        # On the first call, pre-allocate FP32 grad buffers and capture a CUDA graph
+        # that replays all the BF16→FP32 copy kernels in one shot, eliminating
+        # repeated kernel-launch overhead (~250+ separate copies per step).
+        if not hasattr(self, '_grad_copy_graph'):
+            # Build flat lists of (src_view, fp32_buf, shard_main_param) for all params.
+            self._grad_copy_srcs = []
+            self._grad_copy_dsts = []
+            self._grad_copy_params = []
+
+            def build_pairs(model_groups, shard_main_groups):
+                for model_group, shard_main_group in zip(model_groups, shard_main_groups):
+                    for model_param, shard_main_param in zip(model_group, shard_main_group):
+                        param_range_map = self._get_model_param_range_map(model_param)
+                        param_range = param_range_map["param"]
+                        assert param_range.size == shard_main_param.nelement()
+                        model_grad = model_param.main_grad
+                        src = model_grad.view(-1)[param_range.start : param_range.end]
+                        dst = torch.empty(
+                            shard_main_param.nelement(),
+                            dtype=torch.float32,
+                            device=shard_main_param.device,
+                        )
+                        self._grad_copy_srcs.append(src)
+                        self._grad_copy_dsts.append(dst)
+                        self._grad_copy_params.append(shard_main_param)
+
+            build_pairs(self.model_float16_groups, self.shard_fp32_from_float16_groups)
+            build_pairs(self.model_fp32_groups, self.shard_fp32_groups)
+
+            # Do one eager copy to warm up memory and verify correctness.
+            for src, dst in zip(self._grad_copy_srcs, self._grad_copy_dsts):
+                dst.copy_(src)
+            for shard_main_param, dst in zip(self._grad_copy_params, self._grad_copy_dsts):
+                shard_main_param.grad = dst
+
+            # Capture the copy sequence in a CUDA graph.
+            # The DDP grad buffer and FP32 grad buffers have fixed GPU addresses,
+            # so the graph safely replays the same kernels every step.
+            torch.cuda.synchronize()
+            self._grad_copy_graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(self._grad_copy_graph):
+                for src, dst in zip(self._grad_copy_srcs, self._grad_copy_dsts):
+                    dst.copy_(src)
+            torch.cuda.synchronize()
+            return
+
+        # Fast path: replay the pre-captured graph and re-assign .grad pointers.
+        self._grad_copy_graph.replay()
+        for shard_main_param, dst in zip(self._grad_copy_params, self._grad_copy_dsts):
+            shard_main_param.grad = dst
 
     def _copy_main_params_to_model_params(self):
         """
