@@ -906,9 +906,15 @@ def get_megatron_optimizer(
     log_single_rank(logger, logging.INFO, f'Setting up optimizer with config {config}')
 
     # Separate out first model chunk if overlapping param AG with optimizer step.
+    # With a single model chunk (PP=1, no VP), skip the split to avoid an empty
+    # second-chunk DistributedOptimizer; apply the overlap flag to the single chunk.
     if config.overlap_param_gather_with_optimizer_step:
-        all_dense_model_chunks = [[model_chunks[0]], model_chunks[1:]]
-        overlap_param_gather_with_optimizer_step_flags = [True, False]
+        if len(model_chunks) > 1:
+            all_dense_model_chunks = [[model_chunks[0]], model_chunks[1:]]
+            overlap_param_gather_with_optimizer_step_flags = [True, False]
+        else:
+            all_dense_model_chunks = [model_chunks]
+            overlap_param_gather_with_optimizer_step_flags = [True]
     else:
         all_dense_model_chunks = [model_chunks]
         overlap_param_gather_with_optimizer_step_flags = [False]
