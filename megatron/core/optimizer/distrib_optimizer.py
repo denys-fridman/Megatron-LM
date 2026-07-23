@@ -3027,7 +3027,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                     f"Parameter {name} has {len(matched_keys)} matches in state dict "
                     f"(tried candidates: {candidates})"
                 )
-                state_dict_param = chunk_state_dict[matched_keys[0]]
+                state_dict_param = state_dict_list[chunk_idx][matched_keys[0]]
                 assert model_param.shape == state_dict_param.shape
                 model_param_to_state_dict_param_map[model_param] = state_dict_param
                 names_in_state_dict.remove(matched_keys[0])
